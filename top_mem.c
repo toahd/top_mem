@@ -8,15 +8,27 @@
 #include <dirent.h>
 #include <unistd.h>
 
+/*
+ *  __________
+ * /__   ____/      ___       ___
+ *    | | ___   ____| |     __| |
+ *    | |/ _ \ / _  | |___ / _  |
+ *    | | (_) | (_| |  _  | (_| |
+ *    |_|\___/ \___ |_| |_|\____| */
 /******************************************************************************
 * [DESCRIPTION]
 * Program meant to be used in a replacement memory module for Waybar. Provides
-* a more precise utilization number and hover tooltip to display processes with
-* the highest memory usage.
+* a more precise utilization percent and hover tooltip to display processes 
+* with the highest memory usage.
 *
 * [FILE] top_mem.c
 * [LICENSE] GNU GPLv3
 ******************************************************************************/
+
+// TODOs:
+// - Read from a file other than /proc/$PID/status to avoid extra kernel space
+// overhead. the status file has extraneous information and is around 1500 Kb, 
+// an alternative source to read from would be either statm or stat.
 
 // number has been derived emperically as status files have not been seen to 
 // grow larger than 2KB in size:
@@ -30,7 +42,7 @@ const char PROC[] = "/proc";
 const char STATUS[] = "/status";
 
 // key type decides parsing logic when a key is found
-typedef enum { KEY_LONG, KEY_STRING, KEY_INT, NONE } key_type;
+typedef enum { KEY_LONG, KEY_STRING, NONE } key_type;
 
 // holds the values parse from the status_keys
 typedef struct {
@@ -54,22 +66,23 @@ typedef struct {
 #define KEY_S(k, field) { (k), sizeof(k) - 1, KEY_STRING, \
 	offsetof(proc_status, field), \
 	sizeof(((proc_status*)0)->field) }
-#define KEY_I(k, field) { (k), sizeof(k) - 1, KEY_INT, \
-	offsetof(proc_status, field), \
-	sizeof(((proc_status*)0)->field) }
+// add back to key_type enum if an INT parser is needed again
+//#define KEY_I(k, field) { (k), sizeof(k) - 1, KEY_INT, \
+//	offsetof(proc_status, field), \
+//	sizeof(((proc_status*)0)->field) }
 
 // full list of keys to search for in the PIDs status file. They are listed 
 // below in the order that they appear in the status files. The status files
 // are walked ONCE from top to bottom and loops through the keys as they are
 // found. keys found that are not the current key will get skipped as a 
-// consequence
+// consequence - so add new keys in order!
 // $ cat /proc/$$/status | grep -En "Name|VmRSS|NSpid"
 // 1:Name:   bash
 // 14:NSpid: 321312
 // 23:VmRSS: 6720 kB
 static status_key status_keys[] = {
 	KEY_S("Name:", name),
-	KEY_I("NSpid:", pid),
+	//KEY_I("NSpid:", pid), optimization: just take from file name
 	KEY_L("VmRSS:", vmrss),
 	{NULL, 0, NONE, 0, 0}
 };
@@ -92,6 +105,7 @@ int parse_status(int fd, proc_status *out) {
 	
 	// start looping through status_keys
 	const char *pos = buff;
+	const char *end = buff + bytes_read;
 	const status_key *curr_key = status_keys;
 	
 	while(*pos && curr_key->key != NULL) {
@@ -129,9 +143,16 @@ int parse_status(int fd, proc_status *out) {
 
 			curr_key++;
 		}
-
-		while(*pos && *pos != '\n') pos++;
-		if (*pos == '\n') pos++;
+		
+		// replace this logic with memchr
+		//while(*pos && *pos != '\n') pos++;
+		//if (*pos == '\n') pos++;
+		
+		// Takes advantage of SIMD, instead of reading a single byte at
+		// a time this reads in 32 bytes at a time
+		const char *nl = memchar(pos, '\n', end-pos);
+		if (!nl) break;
+		pos = nl++;
 	}
 
 	return 1;
@@ -139,16 +160,16 @@ int parse_status(int fd, proc_status *out) {
 
 // insertion sort algorithm that builds up the top[5] array
 // idx 0 holds the largest proc_status based on vmrss
-void insert(proc_status candidate) {
+void insert(const proc_status *candidate) {
 	for (int i = 0; i < NUM_TOPS; i++) {
 		// is the current idx smaller than the new vmrss?
-		if (candidate.vmrss > top[i].vmrss) {
+		if (candidate->vmrss > top[i].vmrss) {
 			// if so, shift all elements from idx backwards
 			for (int j = NUM_TOPS - 1; j > i; j--) {
 				top[j] = top[j - 1];
 			}
 			// replace the idx that was pushed back
-			top[i] = candidate;
+			top[i] = *candidate;
 			break;
 		}
 	}
@@ -184,9 +205,10 @@ int main() {
 			continue;
 		}
 		
-		proc_status new_status = {-1, -1, ""};
+		// set PID field, can grab if from the dirent struct
+		proc_status new_status = { .vmrss = -1, .pid = atoi(ent->d_name), .name = ""};
 		if (parse_status(fd, &new_status)) {
-			insert(new_status);
+			insert(&new_status);
 		}
 		close(fd);
 	}

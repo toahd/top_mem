@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,7 +99,7 @@ typedef struct {
 // 23:VmRSS: 6720 kB
 static status_key status_keys[] = {
 	KEY_S("Name:", name),
-	//KEY_I("NSpid:", pid), optimization: just take from file name
+	//KEY_I("NSpid:", pid), optimization: take from file name, no parsing
 	KEY_L("VmRSS:", vmrss),
 	{NULL, 0, NONE, 0, 0}
 };
@@ -107,22 +108,31 @@ static status_key status_keys[] = {
 static proc_status top[5] = {0};
 #define NUM_TOPS (sizeof(top) / sizeof(top[0]))
 
-// parses the /proc/$PID/status files for status_keys, and stores the values in
-// top[] as a proc_status struct
-int parse_status(int fd, proc_status *out) {
+/*
+ * parse_status - parses the /proc/$PID/status files for status_keys, and 
+ * stores the values in top[] as a proc_status struct
+ *
+ * @status_fd: open file descriptor to a /proc/$pid/status file
+ *
+ * @*out: pointer to the proc_status struct to mutate
+ */
+bool parse_status(int status_fd, proc_status *out, bool has_exe) {
 	// any bytes read from file?
 	char buff[BUFFER_SIZE];
-	ssize_t bytes_read = read(fd, buff, sizeof(buff) -1);
+	ssize_t bytes_read = read(status_fd, buff, sizeof(buff) -1);
 	if (bytes_read <= 0) {
-		perror("Read no bytes from fd");
-		return -1;
+		perror("Read no bytes from status fd");
+		return false;
 	}
 	buff[bytes_read] = '\0'; // make it a proper C string
 	
 	// start looping through status_keys
 	const char *pos = buff;
-	const char *end = buff + bytes_read;
 	const status_key *curr_key = status_keys;
+	
+	// if a exe name was found, skip comm name
+	// this assumes 'Name:' always is in spot one of status_keys!
+	if(has_exe) curr_key++;
 	
 	while(*pos && curr_key->key != NULL) {
 		if (strncmp(pos, curr_key->key, curr_key->key_len) == 0) {	
@@ -130,7 +140,7 @@ int parse_status(int fd, proc_status *out) {
 			char *dest = (char *)out + curr_key->offset;
 			
 			if (curr_key->type == KEY_STRING) {
-				while (*pos == ' ' || *pos == '\t')
+				while (*pos == '\t' || *pos == ' ')
 					pos++;
 		
 				size_t i = 0;
@@ -162,22 +172,48 @@ int parse_status(int fd, proc_status *out) {
 		
 		// Takes advantage of SIMD, instead of reading a single byte at
 		// a time this reads in 32 bytes at a time
+		const char *end = buff + bytes_read;
 		const char *nl = memchr(pos, '\n', end - pos);
 		if (!nl) break;
 		pos = nl + 1;
 	}
 
-	return 1;
+	return true;
 
 }
 
-int parse_exe(int fd, proc_status *out, const char *pid) {
+/* 
+ * parse_exe - parses the /proc/$pid/exe files for the name of the program that
+ * launched the process. This is prefered over using the comm (key Name:) found
+ * in the status files. As a process forks more children the comm might get 
+ * replaced with another name, where the exe name should remain stable. The exe
+ * name is perfered to the comm name and if found will take precedence over the
+ * comm name.
+ *
+ * This can be seen with Firefox, which opens a new process per tab and has a
+ * few different names it uses like: firefox, Isolated Web, Privileged Co, etc.
+ * By using the exe name these programs, which all have exe name 'firefox', 
+ * can be aggregated together. Otherwise, if a user has 5 tabs open at once
+ * (not uncommon) then they might only see Firfox and it's related processes in
+ * the tooltip.
+ *
+ * It is for this reason that the exe name is perfered to the comm name and if 
+ * found will take precedence.
+ *
+ * @exe_fd: open file descriptor to a /proc/$pid/exe file
+ *
+ * @*out: pointer to the proc_status struct to mutate
+ *
+ * @pid: pid of the process to parse exe for
+ *
+ */
+bool parse_exe(int exe_fd, proc_status *out, const char *pid) {
 	char link[32], exe_path[EXE_PATH_MAX];
 	
 	// build up the name of the symlink, when using a relative link path
 	// the link is resolved relative to the directory fd
 	snprintf(link, sizeof(link), "%.15s/exe", pid);
-	ssize_t bytes_read = readlinkat(fd, link, exe_path, sizeof exe_path - 1);
+	ssize_t bytes_read = readlinkat(exe_fd, link, exe_path, sizeof exe_path - 1);
 	if (bytes_read <= 0) return -1;
 	// must manually append the null terminator
 	exe_path[bytes_read] = '\0';
@@ -191,12 +227,16 @@ int parse_exe(int fd, proc_status *out, const char *pid) {
 
 	printf("%s\n", out->name);
 
-	return 1;
+	return true;
 
 }
 
-// insertion sort algorithm that builds up the top[5] array from zero
-// idx 0 holds the largest proc_status based on vmrss
+/* insert - insertion sort algorithm that builds up the top[5] array from zero.
+ * idx 0 holds the largest proc_status based on vmrss
+ *
+ * @*candidate: the latest proc_status parsed from a $pid file that has its 
+ * vmrss checked against all other top 5 processes currently being stored
+ */
 void insert(const proc_status *candidate) {
 	for (size_t i = 0; i < NUM_TOPS; i++) {
 		// is the current idx smaller than the new vmrss?
@@ -212,6 +252,10 @@ void insert(const proc_status *candidate) {
 	}
 }
 
+/* main - contians the logic to open the /proc dir and loop over all of the
+ * processes to hand off file descriptors/pids to the parse functions. main
+ * handles closing the file descriptors.
+ */
 int main() {
 	// open the proc dir
 	int proc_fd = open(PROC, O_RDONLY | O_DIRECTORY);
@@ -238,7 +282,7 @@ int main() {
 		}
 		
 		// /proc is 5
-		// PIDs are at most 7, butd_name has a size of 256, so truncate to 7 chars
+		// PIDs are at most 7, but d_name has a size of 256, so truncate to 7 chars
 		// /status is 7
 		// + '\0'
 		char status_path[STATUS_PATH_MAX];
@@ -254,9 +298,11 @@ int main() {
 		proc_status new_status = { .vmrss = -1, .pid = atoi(ent->d_name), .name = ""};
 		
 		// attempt to parse an exe name
-		parse_exe(proc_fd, &new_status, ent->d_name);
-
-		if (parse_status(fd, &new_status)) {
+		bool has_exe = parse_exe(proc_fd, &new_status, ent->d_name);
+		
+		// attempt to parse memory usage and comm name if exe name was 
+		// not found
+		if (parse_status(fd, &new_status, has_exe)) {
 			insert(&new_status);
 		}
 		close(fd);

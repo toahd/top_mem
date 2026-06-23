@@ -55,7 +55,7 @@
 // pids at most can be 7 characters long
 // [toahd@framework13 top_mem]$ wc -L < /proc/sys/kernel/pid_max
 // 7
-#define STATUS_PATH_MAX 21
+#define STATUS_PATH_MAX 15
 
 // individual $PIDs comes from the dirent stream while looping through /proc
 // the full paths look like /proc/$PID/status
@@ -116,6 +116,7 @@ static proc_status top[5] = {0};
  *
  * @*out: pointer to the proc_status struct to mutate
  */
+__attribute__((noinline))
 bool parse_status(int status_fd, proc_status *out, bool has_exe) {
 	// any bytes read from file?
 	char buff[BUFFER_SIZE];
@@ -207,6 +208,7 @@ bool parse_status(int status_fd, proc_status *out, bool has_exe) {
  * @pid: pid of the process to parse exe for
  *
  */
+__attribute__((noinline))
 bool parse_exe(int exe_fd, proc_status *out, const char *pid) {
 	char link[32], exe_path[EXE_PATH_MAX];
 	
@@ -214,7 +216,7 @@ bool parse_exe(int exe_fd, proc_status *out, const char *pid) {
 	// the link is resolved relative to the directory fd
 	snprintf(link, sizeof(link), "%.15s/exe", pid);
 	ssize_t bytes_read = readlinkat(exe_fd, link, exe_path, sizeof exe_path - 1);
-	if (bytes_read <= 0) return -1;
+	if (bytes_read <= 0) return false;
 	// must manually append the null terminator
 	exe_path[bytes_read] = '\0';
 	
@@ -224,8 +226,6 @@ bool parse_exe(int exe_fd, proc_status *out, const char *pid) {
 	size_t len = strlen(src);
 	if (len >= sizeof(out->name)) len = sizeof out->name - 1;
 	memcpy(out->name, src, len);
-
-	printf("%s\n", out->name);
 
 	return true;
 
@@ -237,6 +237,7 @@ bool parse_exe(int exe_fd, proc_status *out, const char *pid) {
  * @*candidate: the latest proc_status parsed from a $pid file that has its 
  * vmrss checked against all other top 5 processes currently being stored
  */
+__attribute__((noinline))
 void insert(const proc_status *candidate) {
 	for (size_t i = 0; i < NUM_TOPS; i++) {
 		// is the current idx smaller than the new vmrss?
@@ -286,8 +287,8 @@ int main() {
 		// /status is 7
 		// + '\0'
 		char status_path[STATUS_PATH_MAX];
-		snprintf(status_path, sizeof(status_path), "%s/%.7s%s", PROC, ent->d_name, STATUS);
-		printf("status path: %s\n", status_path);
+		snprintf(status_path, sizeof(status_path), "%.7s%s", ent->d_name, STATUS);
+		
 		int fd = openat(proc_fd, status_path, O_RDONLY);
 		if (fd == -1) {
 			perror("Could not open pid dir");

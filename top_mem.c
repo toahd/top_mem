@@ -49,18 +49,23 @@
 // the maximum path length is directory specific, 
 // [toahd@framework13 top_mem]$ getconf PATH_MAX /
 // 4096
-#define EXE_PATH_MAX 4096
+#define PATH_MAX 4096
 
-// max length of a path to status, i.e. /proc/$pid/status + '\0'
+// max length of a path to a specific pid, i.e. /proc/$pid + '\0'
 // pids at most can be 7 characters long
 // [toahd@framework13 top_mem]$ wc -L < /proc/sys/kernel/pid_max
 // 7
-#define STATUS_PATH_MAX 15
+#define PID_LENGTH 7
 
 // individual $PIDs comes from the dirent stream while looping through /proc
 // the full paths look like /proc/$PID/status
 const char PROC[] = "/proc";
 const char STATUS[] = "/status";
+const char EXE[] = "/exe";
+const char STATM[] = "/statm";
+
+// holds the page size the kernel uses for statm calculations
+static long page_kb;
 
 // key type decides parsing logic when a key is found
 typedef enum { KEY_LONG, KEY_STRING, NONE } key_type;
@@ -99,7 +104,7 @@ typedef struct {
 // 23:VmRSS: 6720 kB
 static status_key status_keys[] = {
 	KEY_S("Name:", name),
-	//KEY_I("NSpid:", pid), optimization: take from file name, no parsing
+	//KEY_I("NSpid:", pid), optimization: take from file name instead of parsing
 	KEY_L("VmRSS:", vmrss),
 	{NULL, 0, NONE, 0, 0}
 };
@@ -110,17 +115,28 @@ static proc_status top[5] = {0};
 
 /*
  * parse_status - parses the /proc/$PID/status files for status_keys, and 
- * stores the values in top[] as a proc_status struct
+ * stores the values in top[] as a proc_status struct.
  *
  * @status_fd: open file descriptor to a /proc/$pid/status file
  *
  * @*out: pointer to the proc_status struct to mutate
  */
-__attribute__((noinline))
-bool parse_status(int status_fd, proc_status *out, bool has_exe) {
+bool parse_status(int proc_fd, proc_status *out, char *pid) {
+	
+	// /proc is 5
+	// PIDs are at most 7, but d_name has a size of 256, so truncate to 7 chars
+	// /status is 7
+	// + '\0'
+	char status_path[PID_LENGTH + sizeof STATUS];
+	snprintf(status_path, sizeof(status_path), "%.7s%s", pid, STATUS);
+	
+	int status_fd = openat(proc_fd, status_path, O_RDONLY);
+	if (status_fd < 0) return false;
+
 	// any bytes read from file?
 	char buff[BUFFER_SIZE];
 	ssize_t bytes_read = read(status_fd, buff, sizeof(buff) -1);
+	close(status_fd);
 	if (bytes_read <= 0) {
 		perror("Read no bytes from status fd");
 		return false;
@@ -130,10 +146,6 @@ bool parse_status(int status_fd, proc_status *out, bool has_exe) {
 	// start looping through status_keys
 	const char *pos = buff;
 	const status_key *curr_key = status_keys;
-	
-	// if a exe name was found, skip comm name
-	// this assumes 'Name:' always is in spot one of status_keys!
-	if(has_exe) curr_key++;
 	
 	while(*pos && curr_key->key != NULL) {
 		if (strncmp(pos, curr_key->key, curr_key->key_len) == 0) {	
@@ -178,50 +190,78 @@ bool parse_status(int status_fd, proc_status *out, bool has_exe) {
 		if (!nl) break;
 		pos = nl + 1;
 	}
-
+	
 	return true;
+}
 
+/* TODO */
+bool parse_statm(int proc_fd, proc_status *out, char* pid) {
+	// build up relative path to statm file
+	char statm_path[PID_LENGTH + sizeof STATM]; // pid relative path buffer: 1234567/statm'\0'
+	snprintf(statm_path, sizeof statm_path, "%.7s%s", pid, STATM);
+
+	int statm_fd = openat(proc_fd, statm_path, O_RDONLY);
+	if (statm_fd < 0) return false;
+
+	char buff[148];
+	ssize_t bytes_read = read(statm_fd, buff, sizeof(buff) - 1);	
+	close(statm_fd);
+	if (bytes_read <= 0) {
+		perror("Read no bytes from status fd");
+		return false;
+	}
+	buff[bytes_read] = '\0'; // make it a proper C string
+
+	// proc_status keys don't matter here, in statm only the second field
+	// should ever be needed and is simple to parse. fields are space
+	// delimited
+	const char *pos = strchr(buff, ' ') + 1;
+
+	while(*pos != ' ') {	
+		long val = 0;
+		while (*pos >= '0' && *pos <= '9') {
+			val = val * 10 + (*pos++ - '0');
+		}
+		
+		out->vmrss = val * page_kb;
+	}
+	
+	return true;
 }
 
 /* 
- * parse_exe - parses the /proc/$pid/exe files for the name of the program that
- * launched the process. This is prefered over using the comm (key Name:) found
- * in the status files. As a process forks more children the comm might get 
- * replaced with another name, where the exe name should remain stable. The exe
- * name is perfered to the comm name and if found will take precedence over the
- * comm name.
+ * parse_exe - parses the /proc/$pid/exe symlink for the name of the program 
+ * that launched the process. This is prefered over using the comm (key Name:)
+ * found in the status files. As a process forks more children the comm might
+ * get replaced with another name. Whereas the exe name should remain stable.
+ * If an exe name is found it will take precedence over the comm name.
  *
- * This can be seen with Firefox, which opens a new process per tab and has a
- * few different names it uses like: firefox, Isolated Web, Privileged Co, etc.
- * By using the exe name these programs, which all have exe name 'firefox', 
- * can be aggregated together. Otherwise, if a user has 5 tabs open at once
- * (not uncommon) then they might only see Firfox and it's related processes in
- * the tooltip.
+ * For example, this effect of comm name changing can be seen with Firefox, 
+ * which opens a new process per tab and has a few different names it uses such
+ * as: firefox, Isolated Web, Privileged Co, etc... By using the exe name these
+ * programs, which all have exe name 'firefox', can be aggregated together.
+ * Otherwise, if a user has 5 tabs open at once (not uncommon) then they might
+ * only see Firfox and it's related processes in the tooltip.
  *
- * It is for this reason that the exe name is perfered to the comm name and if 
- * found will take precedence.
- *
- * @exe_fd: open file descriptor to a /proc/$pid/exe file
+ * @proc_fd: open file descriptor to /proc
  *
  * @*out: pointer to the proc_status struct to mutate
- *
- * @pid: pid of the process to parse exe for
- *
  */
-__attribute__((noinline))
-bool parse_exe(int exe_fd, proc_status *out, const char *pid) {
-	char link[32], exe_path[EXE_PATH_MAX];
-	
-	// build up the name of the symlink, when using a relative link path
-	// the link is resolved relative to the directory fd
-	snprintf(link, sizeof(link), "%.15s/exe", pid);
-	ssize_t bytes_read = readlinkat(exe_fd, link, exe_path, sizeof exe_path - 1);
+bool parse_exe(int proc_fd, proc_status *out, const char *pid) {
+	// build up relative path to exe symlink
+	char exe[PID_LENGTH + sizeof EXE]; // pid relative path buffer: 1234567/exe'\0'
+	snprintf(exe, sizeof exe, "%.7s%s", pid, EXE);
+
+	// the contents of this buffer will look something like: /path/to/some/binary
+	// the max supported path length on the system should be taken into account
+	char buff[PATH_MAX];	
+	ssize_t bytes_read = readlinkat(proc_fd, exe, buff, sizeof buff - 1);
 	if (bytes_read <= 0) return false;
 	// must manually append the null terminator
-	exe_path[bytes_read] = '\0';
+	buff[bytes_read] = '\0';
 	
-	const char *base = strrchr(exe_path, '/');
-	const char *src = base ? base + 1 : exe_path;
+	const char *base = strrchr(buff, '/');
+	const char *src = base ? base + 1 : buff;
 
 	size_t len = strlen(src);
 	if (len >= sizeof(out->name)) len = sizeof out->name - 1;
@@ -237,7 +277,6 @@ bool parse_exe(int exe_fd, proc_status *out, const char *pid) {
  * @*candidate: the latest proc_status parsed from a $pid file that has its 
  * vmrss checked against all other top 5 processes currently being stored
  */
-__attribute__((noinline))
 void insert(const proc_status *candidate) {
 	for (size_t i = 0; i < NUM_TOPS; i++) {
 		// is the current idx smaller than the new vmrss?
@@ -258,14 +297,15 @@ void insert(const proc_status *candidate) {
  * handles closing the file descriptors.
  */
 int main() {
-	// open the proc dir
+	// open the proc dir, to limit the amount of syscalls this should be the ONLY
+	// file descriptor opened
 	int proc_fd = open(PROC, O_RDONLY | O_DIRECTORY);
 	if (proc_fd == -1) {
 		perror("Failed to open proc dir");
 		return 1;
 	}
 	
-	// get a dir stream
+	// get a dir stream over the /proc fd
 	DIR *dir_stream = fdopendir(proc_fd);
 	if (!dir_stream) {
 		perror("Failed to bind to directory stream");
@@ -273,25 +313,16 @@ int main() {
 		return 1;
 	}
 	
+	// before entering loop and parsing, get page size
+	page_kb = sysconf(_SC_PAGESIZE) / 1024;
+
 	// loop and look for [0-9] as the first char, characteristic of a PID
 	struct dirent *ent;
 	while ((ent = readdir(dir_stream)) != NULL) {
 		// is this directory a pid? will only contain numbers
-		// TODO, a process might start with a number that's not a PID
+		// TODO, a process might start with a number and still not be a
+		// PID that maps to a process
 		if (ent->d_name[0] < '0' || ent->d_name[0] > '9') {
-			continue;
-		}
-		
-		// /proc is 5
-		// PIDs are at most 7, but d_name has a size of 256, so truncate to 7 chars
-		// /status is 7
-		// + '\0'
-		char status_path[STATUS_PATH_MAX];
-		snprintf(status_path, sizeof(status_path), "%.7s%s", ent->d_name, STATUS);
-		
-		int fd = openat(proc_fd, status_path, O_RDONLY);
-		if (fd == -1) {
-			perror("Could not open pid dir");
 			continue;
 		}
 		
@@ -299,14 +330,19 @@ int main() {
 		proc_status new_status = { .vmrss = -1, .pid = atoi(ent->d_name), .name = ""};
 		
 		// attempt to parse an exe name
-		bool has_exe = parse_exe(proc_fd, &new_status, ent->d_name);
-		
-		// attempt to parse memory usage and comm name if exe name was 
-		// not found
-		if (parse_status(fd, &new_status, has_exe)) {
-			insert(&new_status);
+		if(parse_exe(proc_fd, &new_status, ent->d_name)) {
+			// if an exe name was found then just parse statm
+			// comm name is not needed and statm is much smaller
+			parse_statm(proc_fd, &new_status, ent->d_name);
+		} else {
+			// attempt to parse memory usage and comm name if exe name was 
+			// not found
+			parse_status(proc_fd, &new_status, ent->d_name);
 		}
-		close(fd);
+		
+		// Note that insert does not gaurentee an insertion, insertion
+		// only happens if this is a top 5 contender
+		insert(&new_status);
 	}
 
 	closedir(dir_stream);

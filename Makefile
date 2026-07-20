@@ -1,19 +1,25 @@
-CC := gcc
-CFLAGS := -Wall -Wextra -Werror -std=gnu11 -O3 -static -march=native
+CC      := gcc
+CFLAGS  := -Wall -Wextra -Werror -std=gnu11 -O3 -flto -static -march=native
+LDFLAGS := -flto
 
-TARGET := top_mem
-SRC := $(TARGET).c
+OBJS    := top_mem.o buckets.o
+TARGET  := top_mem
+SRC     := $(TARGET).c
+
+RM      := rm -f
 
 .PHONY: all
 all: $(TARGET)
 
-profile:
-	gcc -Wall -Wextra -Werror -std=gnu11 -O3 -g -static -fno-omit-frame-pointer -march=native -DPROFILE ./top_mem.c -o top_mem
+$(TARGET): $(OBJS)
+	$(CC) $(LDFLAGS) $^ -o $@
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $@ $^
+top_mem.o buckets.o: buckets.h
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
 .PHONY: clean
 clean:
-	rm -f $(TARGET)
+	$(RM) $(TARGET) $(OBJS)
 

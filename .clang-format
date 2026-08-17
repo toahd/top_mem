@@ -1,0 +1,13 @@
+Language: Cpp
+BasedOnStyle: LLVM
+ColumnLimit: 80
+IndentWidth: 4
+ReflowComments: Never
+CommentPragmas: '.*'
+AlignTrailingComments: false
+AlignEscapedNewlines: Left
+AlignConsecutiveMacros: None
+IndentPPDirectives: None
+PenaltyExcessCharacter: 1
+MaxEmptyLinesToKeep: 1
+

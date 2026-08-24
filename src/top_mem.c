@@ -15,49 +15,37 @@
 #include "configs.h"
 #include "whitelist.h"
 
-/*
+#include "parse_pid.c"
+#include "parse_statm.c"
+#include "read_comm.c"
+#include "read_exe.c"
+
+/******************************************************************************
  *  __________
  * /__   ____/      ___       ___
  *    | | ___   ____| |     __| |
  *    | |/ _ \ / _  | |___ / _  |
  *    | | (_) | (_| |  _  | (_| |
- *    |_|\___/ \___ |_| |_|\____| */
-/******************************************************************************
+ *    |_|\___/ \___ |_| |_|\____|
+ * ----------------------------------------------------------------------------
  * [DESCRIPTION]
- * Small monolithic C program designed to be used in a replacement memory module
- * for Waybar. Provides a more precise utilization percent text and a tooltip to
- * display top processes with the highest memory usage.
+ * Replacement memory module for Waybar. Provides a more precise utilization 
+ * percent text and, in contrast to the default module, offers a tooltip that
+ * displays the top processes with the highest memory usage.
  *
- * Information is gathered from /proc where the individual PID files inside are
- * subsequently looped over. Within each pid directory the following files get
- * opened, read and parsed:
- *     exe - provides the name of the executable that launched the program
- *     comm - provides the comm name of process
- *     statm - provides memory statistics of the processes
- *
- * This information is aggregated and printed out via JSON through stdin to
- * properly interface with Waybar.
+ * Information about the processes running on the host machine is collected 
+ * from various files and then aggregated together. This module attempts to
+ * provide an accurate view (while staying performant) of the systems memory 
+ * usage. Some shortcuts are taken such as caching and favoring smaller/less
+ * accurate files in order to meet some admittently arbitrary timing 
+ * requirements.
  *
  * [FILE] top_mem.c
  * [LICENSE] GNU GPLv3
- ******************************************************************************/
-
-// how often to run main loop
-#ifndef INTERVAL_SECS
-#define INTERVAL_SECS 1
-#endif
+ *****************************************************************************/
 
 // page size the kernel uses, required for for parse_statm
 static long page_kb;
-
-static pinfo top[10] = {0};
-#define NUM_TOPS (sizeof(top) / sizeof(top[0]))
-
-// forward declared
-bool read_exe(int proc_fd, pinfo *out, const char *pid);
-bool read_comm(int proc_fd, pinfo *out);
-bool parse_pid(const char *name, uint32_t *pid, pinfo *status);
-bool parse_statm(int proc_fd, pinfo *out, char *pid, long page_kb);
 
 /* insert - insertion sort algorithm that builds up the top[5] array from zero.
  * idx 0 holds the largest pinfo based on vmrss
@@ -65,7 +53,7 @@ bool parse_statm(int proc_fd, pinfo *out, char *pid, long page_kb);
  * @*candidate: the latest pinfo parsed from a $pid file that has its
  * vmrss checked against all other top 5 processes currently being stored
  */
-void insert(const pinfo *candidate) {
+void insert(pinfo *top, const pinfo *candidate) {
     for (size_t i = 0; i < NUM_TOPS; i++) {
         // is the current idx smaller than the new vmrss?
         if (candidate->vmrss > top[i].vmrss) {
@@ -81,13 +69,7 @@ void insert(const pinfo *candidate) {
     }
 }
 
-/* main - Contians the core logic to open the /proc dir and loop over all of
- * the files inside, decide what's a process and hand off the /proc fd and
- * current pid to the parse functions to gather statistics.
- */
 int main() {
-    // open the proc dir, to limit the amount of syscalls this should be the
-    // ONLY file descriptor opened
     const char PROC[] = "/proc";
     int proc_fd = open(PROC, O_RDONLY | O_DIRECTORY);
     if (proc_fd == -1) {
@@ -95,7 +77,6 @@ int main() {
         return 1;
     }
 
-    // get a dir stream over the /proc fd
     DIR *dir_stream = fdopendir(proc_fd);
     if (!dir_stream) {
         perror("Failed to bind to directory stream");
@@ -103,20 +84,16 @@ int main() {
         return 1;
     }
 
-    // before entering loop and parsing, get page size
     page_kb = sysconf(_SC_PAGESIZE) / 1024;
 
-    // blacklist for PIDs that fail read_exe
-    blacklist bl = {0};
-
-    // whitelist for PIDs that complete read_exe, caches their exe name
-    whitelist wl = {0};
+    pinfo top[NUM_TOPS] = {};
+    blacklist bl = {0}; // negative cache for PIDs that fail read_exe
+    whitelist wl = {0}; // cache of PIDs that pass read_exe w/ their exe name
 
     struct dirent *ent;
     struct timespec t_start, t_end;
-    int pid_count;
-    int blacklist_hits;
-    int whitelist_hits;
+    int pid_count, blacklist_hits, whitelist_hits;
+
     while (true) {
         pid_count = 0;
         blacklist_hits = 0;
@@ -175,7 +152,7 @@ int main() {
 
             // Note that insert does not gaurentee an insertion!
             // insertion only happens if this proc is a top 5 contender
-            insert(&status);
+            insert(top, &status);
         }
 
         clock_gettime(CLOCK_MONOTONIC, &t_end);

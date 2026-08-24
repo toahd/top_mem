@@ -12,6 +12,7 @@
 
 #define MASK (BL_MAP_SIZE - 1) // linear probing
 
+#define BASE_TTL 1
 #define MAX_TTL (UINT8_MAX / 2) + 1 // invariant req. for modular difference
 #define BASE_CONSEC 1
 #define MAX_CONSEC 7 // high values will exceed the half-range

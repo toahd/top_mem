@@ -1,12 +1,16 @@
-CC      := gcc
-CFLAGS  := -Wall -Wextra -Werror -Wconversion -std=gnu11 -O3 -flto -static -march=native
-LDFLAGS := -flto
+CC       := gcc
+CFLAGS   := -Wall -Wextra -Werror -Wconversion -std=gnu11 -O3 -flto -static -march=native
+CPPFLAGS := -I. -Iinclude 
+LDFLAGS  := -flto
 
-OBJS    := top_mem.o buckets.o blacklist.o whitelist.o read_exe.o parse_pid.o read_comm.o parse_statm.o
-TARGET  := top_mem
+TARGET   := top_mem
+OBJS     := top_mem.o buckets.o blacklist.o whitelist.o
+DEPS     := $(OBJS=.o=.d)
 
-FIND    := find
-RM      := rm -f
+VPATH    := src
+
+FIND     := find
+RM       := rm -f
 
 .PHONY: all
 all: $(TARGET)
@@ -14,13 +18,8 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) $^ -o $@
 
-top_mem.o whitelist.o parse_pid.o read_comm.o parse_statm.o read_exe.o: configs.h
-top_mem.o buckets.o: buckets.h
-top_mem.o blacklist.o: blacklist.h
-top_mem.o whitelist.o: whitelist.h
-
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 .PHONY: format-all
 format-all:
@@ -32,5 +31,5 @@ format-%:
 
 .PHONY: clean
 clean:
-	$(RM) $(TARGET) $(OBJS)
+	$(RM) $(TARGET) *.o
 

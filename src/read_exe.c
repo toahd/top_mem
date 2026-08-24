@@ -1,8 +1,8 @@
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <stdio.h>
 
 #include "configs.h"
 
@@ -30,8 +30,7 @@ bool read_exe(int proc_fd, pinfo *out, const char *pid) {
     const char EXE[] = "/exe";
 
     // build up relative path to exe symlink
-    char exe[PID_LENGTH +
-             sizeof EXE]; // pid relative path buffer: 1234567/exe'\0'
+    char exe[PID_LENGTH + sizeof EXE]; // pid relative path buffer: 1234567/exe'\0'
     snprintf(exe, sizeof exe, "%.7s%s", pid, EXE);
 
     // the contents of this buffer will look something like:

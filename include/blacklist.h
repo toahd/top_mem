@@ -10,13 +10,13 @@
 #define BL_MAP_SIZE (1u << BL_TABLE_BITS)
 
 typedef struct {
-    uint32_t pid;      // required to keep in case of collisions
-    uint8_t born_at;   // tick count this entry was first recorded
+    uint32_t pid; // required to keep in case of collisions
+    uint8_t born_at; // tick count this entry was first recorded
     uint8_t last_seen; // tick count this entry was last seen, useful
-                       // to know if an entry can be evicted before ttl
-    uint8_t ttl;       // tick counts until a entry must be retried
-    uint8_t consec;    // consecuative times entry has been re-added
-                       // used to grow exponential backoff (ttl)
+    // to know if an entry can be evicted before ttl
+    uint8_t ttl; // tick counts until a entry must be retried
+    uint8_t consec; // consecuative times entry has been re-added
+    // used to grow exponential backoff (ttl)
 } bl_entry;
 
 typedef struct {

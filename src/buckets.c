@@ -28,16 +28,14 @@ void add_bucket(const char *name, long vmrss) {
 
     // otherwise, add as a new bucket
     if (bucket_count < MAX_BUCKETS) {
-        snprintf(buckets[bucket_count].name, sizeof buckets[bucket_count].name,
-                 "%s", name);
+        snprintf(buckets[bucket_count].name, sizeof buckets[bucket_count].name, "%s", name);
         buckets[bucket_count].summed_vmrss = vmrss;
         bucket_count++;
     }
 }
 
 static int sort_vmrss_desc(const void *a, const void *b) {
-    long va = ((const bucket *)a)->summed_vmrss,
-         vb = ((const bucket *)b)->summed_vmrss;
+    long va = ((const bucket *)a)->summed_vmrss, vb = ((const bucket *)b)->summed_vmrss;
     return (vb > va) - (vb < va);
 }
 

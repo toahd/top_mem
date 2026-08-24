@@ -1,9 +1,9 @@
-#include <stddef.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <string.h>
-#include <stdio.h>
 #include <fcntl.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "configs.h"
@@ -13,7 +13,7 @@ bool parse_statm(int proc_fd, pinfo *out, char *pid, long page_kb) {
 
     // build up relative path to statm file
     char statm_path[PID_LENGTH + sizeof STATM]; // pid relative path buffer:
-                                                // 1234567/statm'\0'
+    // 1234567/statm'\0'
     snprintf(statm_path, sizeof statm_path, "%.7s%s", pid, STATM);
 
     int statm_fd = openat(proc_fd, statm_path, O_RDONLY);
